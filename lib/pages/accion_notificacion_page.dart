@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:padam_app/services/notification_service.dart';
 import 'package:padam_app/services/registro_toma_service.dart';
 
 // Pagina para registrar acciones sobre notificaciones de medicamentos
@@ -92,11 +93,26 @@ class AccionNotificacionPage extends StatelessWidget {
               title: '⏸ Posponer 10 min',
               subtitle: 'Recordarme más tarde',
               color: Colors.orange,
-              onTap: () {
-                registroService.registrarPostergacion(
+              onTap: () async {
+                // Registra la postergación en BD (tu código existente)
+                await registroService.registrarPostergacion(
                   idMedicamento: idMedicamento,
                   nombreMedicamento: nombreMedicamento,
                 );
+                // Cancela la notificación original (opcional, pero recomendado)
+                await NotificationService.cancelarRecordatorio(idMedicamento);
+                // Reprograma la notificación para 10 minutos después
+                final ahora = DateTime.now();
+                final nuevaHora = ahora.add(const Duration(minutes: 10));
+                await NotificationService.programarRecordatorioMedicamento(
+                  nombreMedicamento: nombreMedicamento,
+                  hora: nuevaHora.hour,
+                  minuto: nuevaHora.minute,
+                  diasSemana: [],  // Vacío para una sola notificación (no semanal)
+                  idMedicamento: idMedicamento,
+                  imagenUrl: imagenUrl,
+                );
+                // Muestra resultado y cierra
                 _mostrarResultado(context, '⏸ Recordatorio pospuesto 10 minutos');
               },
             ),

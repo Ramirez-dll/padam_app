@@ -1,24 +1,26 @@
+import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:padam_app/repositories/medicamento_repository.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:padam_app/models/medicamento.dart';
 
-// Servicio principal para la gestion de notificaciones de la aplicacion
-// 
-// Responsabilidades:
-// - Inicializacion del sistema de notificaciones
-// - Programacion y cancelacion de recordatorios de medicamentos
-// - Manejo de respuestas a notificaciones (taps y acciones)
-// - Proporciona metodos de prueba para desarrollo
+// Función top-level para manejar respuestas en background (requerido por flutter_local_notifications)
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse notificationResponse) {
+  print('Notificación tocada en background: ${notificationResponse.payload}');
+}
+
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
   static bool _inicializado = false;
 
-  // Callback para manejar taps en notificaciones desde cualquier parte de la app
   static Function(int, String)? onNotificacionTap;
 
-  // Inicializa el sistema de notificaciones
-  // Parametros:
-  //   - onTap: Callback opcional para manejar taps en notificaciones
+  // Mapa para almacenar IDs originales -> IDs mapeados (para cancelaciones)
+  static final Map<int, int> _idMap = {};
+
   static Future<void> initialize({Function(int, String)? onTap}) async {
     if (_inicializado) return;
     
@@ -27,8 +29,10 @@ class NotificationService {
     print('Inicializando NotificationService...');
     
     try {
-      // Inicializar timezone para notificaciones programadas
       tz.initializeTimeZones();
+      
+      // Solicitar permisos necesarios para notificaciones programadas
+      await _solicitarPermisos();
       
       const AndroidInitializationSettings androidSettings = 
           AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -40,13 +44,12 @@ class NotificationService {
         iOS: iosSettings,
       );
 
-      // Inicializar el plugin con callback para respuestas
       await _notifications.initialize(
         settings,
         onDidReceiveNotificationResponse: _onNotificationResponse,
+        onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
       );
 
-      // Crear canal de notificaciones para Android
       await _crearCanalNotificaciones();
       
       _inicializado = true;
@@ -57,34 +60,41 @@ class NotificationService {
     }
   }
 
-  // Maneja la respuesta cuando el usuario toca una notificacion
-  static void _onNotificationResponse(NotificationResponse response) {
-    print('Notificación tocada:');
-    print('   - Payload: ${response.payload}');
-    _procesarPayloadForeground(response.payload);
+  // Solicitar permisos para scheduling exacto (Android 12+)
+  static Future<void> _solicitarPermisos() async {
+    if (await Permission.scheduleExactAlarm.isGranted) {
+      print('✅ Permiso SCHEDULE_EXACT_ALARM ya concedido');
+    } else {
+      final status = await Permission.scheduleExactAlarm.request();
+      if (status.isGranted) {
+        print('✅ Permiso SCHEDULE_EXACT_ALARM concedido');
+      } else {
+        print('❌ Permiso SCHEDULE_EXACT_ALARM denegado. Las notificaciones programadas no funcionarán.');
+      }
+    }
   }
 
-  // Procesa el payload de la notificacion cuando la app esta en primer plano
-  // Extrae informacion del medicamento y ejecuta el callback correspondiente
-  static void _procesarPayloadForeground(String? payload) {
+  static void _onNotificationResponse(NotificationResponse response) {
+    print('Notificación tocada en foreground:');
+    print('   - Payload: ${response.payload}');
+    _procesarPayload(response.payload);
+  }
+
+  static void _procesarPayload(String? payload) {
     if (payload != null && payload.startsWith('medicamento_')) {
       print('Procesando payload: $payload');
       
-      // Parsear el payload para extraer ID y nombre del medicamento
       final partes = payload.split('_');
       if (partes.length >= 3) {
         final idMedicamento = int.tryParse(partes[1]);
         final nombreCompleto = partes.sublist(2).join('_');
         
-        // Separar nombre de medicamento y URL de imagen
         final partesNombre = nombreCompleto.split('|');
         final nombreMedicamento = partesNombre.first.replaceAll('_', ' ');
         String? imagenUrl;
         
-        // Procesar URL de imagen si existe
         if (partesNombre.length > 1) {
           imagenUrl = partesNombre[1].replaceAll('_', '/');
-          // Corregir ruta de la imagen para Android
           imagenUrl = imagenUrl.replaceFirst('com.example.padam/app', 'com.example.padam_app');
         }
         
@@ -92,16 +102,38 @@ class NotificationService {
           print('Medicamento: $nombreMedicamento');
           print('Imagen: $imagenUrl');
           
-          // Ejecutar callback si esta registrado
           if (onNotificacionTap != null) {
             onNotificacionTap!(idMedicamento, nombreMedicamento);
           }
+          
+          _reprogramarSiguienteNotificacion(idMedicamento, nombreMedicamento, partesNombre.length > 1 ? partesNombre[1] : null);
         }
       }
     }
   }
 
-  // Crea el canal de notificaciones para Android
+  static Future<void> _reprogramarSiguienteNotificacion(int idMedicamento, String nombreMedicamento, String? imagenUrl) async {
+    final medicamento = await _obtenerMedicamentoPorId(idMedicamento);
+    if (medicamento != null) {
+      await programarRecordatorioMedicamento(
+        nombreMedicamento: medicamento.nombreMed,  // Ajusta según propiedades reales
+        hora: medicamento.horarioMed.hour,
+        minuto: medicamento.horarioMed.minute,
+        diasSemana: medicamento.diasSemana.split(',').map((d) => d.trim()).toList(),  // Asume que es una cadena separada por comas
+        idMedicamento: idMedicamento,
+        imagenUrl: imagenUrl,
+      );
+      print('✅ Reprogramado para el próximo día válido');
+    } else {
+      print('❌ No se pudo reprogramar: medicamento no encontrado');
+    }
+  }
+
+  static Future<Medicamento?> _obtenerMedicamentoPorId(int id) async {
+    final repo = MedicamentoRepository();
+    return await repo.obtenerMedicamentoPorId(id);  // Cambiado aquí
+  }
+
   static Future<void> _crearCanalNotificaciones() async {
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
       'recordatorio_medicamento',
@@ -116,15 +148,14 @@ class NotificationService {
       AndroidFlutterLocalNotificationsPlugin>()?.createNotificationChannel(channel);
   }
 
-  // Programa recordatorios de medicamentos (actualmente solo notificaciones inmediatas)
-  // NOTA: Las notificaciones programadas reales requieren WorkManager
-  // Parametros:
-  //   - nombreMedicamento: Nombre del medicamento
-  //   - hora: Hora programada
-  //   - minuto: Minuto programado
-  //   - diasSemana: Dias de la semana para repetir
-  //   - idMedicamento: ID del medicamento
-  //   - imagenUrl: URL de la imagen del medicamento (opcional)
+  // Función para mapear ID grande a uno pequeño (int32 válido)
+  static int _mapId(int originalId) {
+    final mappedId = originalId % 1000000;
+    _idMap[originalId] = mappedId;
+    print('ID original: $originalId -> ID mapeado: $mappedId');
+    return mappedId;
+  }
+
   static Future<void> programarRecordatorioMedicamento({
     required String nombreMedicamento,
     required int hora,
@@ -133,30 +164,172 @@ class NotificationService {
     required int idMedicamento,
     String? imagenUrl,
   }) async {
-    print('SIMULANDO programación para: $nombreMedicamento');
-    print('Horario simulado: $hora:$minuto');
+    print('Programando recordatorio para: $nombreMedicamento');
+    print('Horario: $hora:$minuto');
     print('Días: ${diasSemana.join(', ')}');
     
-    // Por ahora, solo mostrar notificacion inmediata para testing
-    // Las notificaciones programadas reales requieren WorkManager
-    await _mostrarNotificacionMedicamento(
-      nombreMedicamento: nombreMedicamento,
-      idMedicamento: idMedicamento,
-      idMedicamentoReal: idMedicamento,
-      imagenUrl: imagenUrl,
-    );
-    
-    print('INFO: Las notificaciones programadas reales se implementarán con WorkManager');
+    try {
+      final scheduledTime = _calcularProximaFecha(hora, minuto, diasSemana);
+      if (scheduledTime == null) {
+        print('No se pudo calcular una fecha válida para los días especificados.');
+        return;
+      }
+      
+      // Define mappedId aquí para usarlo en todo el método
+      final mappedId = _mapId(idMedicamento);
+      
+      final nombreCodificado = nombreMedicamento.replaceAll(' ', '_');
+      final imagenCodificada = imagenUrl?.replaceAll('/', '_') ?? '';
+      final payload = imagenCodificada.isNotEmpty 
+          ? 'medicamento_${idMedicamento}_$nombreCodificado|$imagenCodificada'
+          : 'medicamento_${idMedicamento}_$nombreCodificado';
+      
+      const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+        'recordatorio_medicamento',
+        'Recordatorios de Medicamentos',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+      );
+
+      const NotificationDetails details = NotificationDetails(android: androidDetails);
+
+      // Flag para emulador (cambia a false para producción en dispositivo real)
+      const bool isEmulator = true;  // true = usa Timer (hack); false = usa zonedSchedule
+      
+      if (isEmulator) {
+        // Hack para emulador: usa Timer
+        final now = tz.TZDateTime.now(tz.local);
+        final delay = scheduledTime.difference(now).inSeconds;
+        if (delay > 0) {
+          Timer(Duration(seconds: delay), () async {
+            print('⏰ Hack Timer activado: mostrando notificación programada en emulador');
+            await _mostrarNotificacionMedicamento(
+              nombreMedicamento: nombreMedicamento,
+              idMedicamento: mappedId,
+              idMedicamentoReal: idMedicamento,
+              imagenUrl: imagenUrl,
+            );
+            // Reprogramar para el próximo día (simular repetición semanal)
+            _reprogramarSiguienteNotificacion(idMedicamento, nombreMedicamento, imagenUrl);
+          });
+          print('✅ Timer programado para: $scheduledTime (delay: $delay segundos)');
+        } else {
+          print('⚠️ Hora ya pasó, no se programa');
+        }
+      } else {
+        // Para producción: usa zonedSchedule
+        await _notifications.zonedSchedule(
+          mappedId,
+          '💊 Hora de: $nombreMedicamento',
+          'Toca para registrar la toma',
+          scheduledTime,
+          details,
+          payload: payload,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        );
+        print('✅ Notificación programada con zonedSchedule para: $scheduledTime');
+      }
+      
+      print('✅ Notificación programada exitosamente para: $scheduledTime (ID mapeado: $mappedId)');
+    } catch (e) {
+      print('❌ Error programando notificación: $e');
+    }
   }
 
-  // Muestra una notificacion inmediata de medicamento
+  static tz.TZDateTime? _calcularProximaFecha(int hora, int minuto, List<String> diasSemana) {
+    final now = tz.TZDateTime.now(tz.local);
+    print('Hora actual: $now');
+    
+    final Map<String, int> diasMap = {
+      'lunes': 1, 'martes': 2, 'miercoles': 3, 'jueves': 4, 'viernes': 5, 'sabado': 6, 'domingo': 7,
+      'l': 1, 'm': 2, 'x': 3, 'j': 4, 'v': 5, 's': 6, 'd': 7,
+      'lun': 1, 'mar': 2, 'mie': 3, 'jue': 4, 'vie': 5, 'sab': 6, 'dom': 7,
+    };
+    
+    tz.TZDateTime? fechaMasCercana;
+    
+    for (String dia in diasSemana) {
+      final diaLower = dia.toLowerCase();
+      final diaInt = diasMap[diaLower];
+      print('Procesando día: $dia -> $diaLower -> $diaInt');
+      
+      if (diaInt == null) continue;
+      
+      int diasHasta = (diaInt - now.weekday + 7) % 7;
+      if (diasHasta == 0 && (now.hour > hora || (now.hour == hora && now.minute >= minuto))) {
+        diasHasta = 7;  // Si hoy es el día pero la hora ya pasó, ir al próximo
+      }
+      
+      final fechaBase = now.add(Duration(days: diasHasta));
+      final fechaCandidata = tz.TZDateTime(tz.local, fechaBase.year, fechaBase.month, fechaBase.day, hora, minuto);
+      
+      print('Fecha candidata para $dia: $fechaCandidata');
+      
+      // Elegir la fecha más cercana futura
+      if (fechaCandidata.isAfter(now) && (fechaMasCercana == null || fechaCandidata.isBefore(fechaMasCercana))) {
+        fechaMasCercana = fechaCandidata;
+      }
+    }
+    
+    print('Fecha más cercana seleccionada: $fechaMasCercana');
+    return fechaMasCercana;
+  }
+
+  static Future<void> cancelarRecordatorio(int idMedicamento) async {
+    final mappedId = _idMap[idMedicamento] ?? _mapId(idMedicamento);
+    await _notifications.cancel(mappedId);
+    print('Notificación cancelada: ID original $idMedicamento -> mapeado $mappedId');
+  }
+
+  static Future<void> probarNotificacionInmediata() async {
+    await _mostrarNotificacionMedicamento(
+      nombreMedicamento: 'Medicamento de Prueba Inmediata',
+      idMedicamento: 8888,
+      idMedicamentoReal: 8888,
+    );
+  }
+
+  // Método de prueba agresivo: programa repetición cada 1 minuto (para verificar scheduling en emulador)
+  static Future<void> probarNotificacionProgramada() async {
+    print('Probando notificación con repeatInterval (cada 1 minuto)...');
+    
+    try {
+      const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+        'recordatorio_medicamento',
+        'Recordatorios de Medicamentos',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+      );
+
+      const NotificationDetails details = NotificationDetails(android: androidDetails);
+
+      // Repite cada 1 minuto (para prueba en emulador)
+      await _notifications.periodicallyShow(
+        9999,
+        '💊 Prueba Repeat',
+        'Aparece cada 1 minuto',
+        RepeatInterval.everyMinute,
+        details,
+        payload: 'medicamento_9999_Prueba_Repeat',
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,  // Parámetro obligatorio agregado
+      );
+      
+      print('✅ Prueba con repeatInterval programada');
+    } catch (e) {
+      print('❌ Error en prueba repeat: $e');
+    }
+  }
+
   static Future<void> _mostrarNotificacionMedicamento({
     required String nombreMedicamento,
     required int idMedicamento,
     required int idMedicamentoReal,
     String? imagenUrl,
   }) async {
-    // Codificar nombre e imagen para el payload
     final nombreCodificado = nombreMedicamento.replaceAll(' ', '_');
     final imagenCodificada = imagenUrl?.replaceAll('/', '_') ?? '';
     
@@ -171,12 +344,10 @@ class NotificationService {
 
     const NotificationDetails details = NotificationDetails(android: androidDetails);
 
-    // Construir payload con informacion del medicamento
     final payload = imagenCodificada.isNotEmpty 
         ? 'medicamento_${idMedicamentoReal}_$nombreCodificado|$imagenCodificada'
         : 'medicamento_${idMedicamentoReal}_$nombreCodificado';
 
-    // Mostrar notificacion inmediata
     await _notifications.show(
       idMedicamento,
       '💊 Hora de: $nombreMedicamento',
@@ -186,109 +357,5 @@ class NotificationService {
     );
     
     print('Notificación INMEDIATA mostrada: $nombreMedicamento');
-  }
-
-  // Cancela un recordatorio de medicamento
-  // Parametros:
-  //   - idMedicamento: ID del medicamento cuya notificacion cancelar
-  static Future<void> cancelarRecordatorio(int idMedicamento) async {
-    await _notifications.cancel(idMedicamento);
-    print('Notificación cancelada: $idMedicamento');
-  }
-
-  // Metodo de prueba para verificar diferentes metodos de programacion
-  static Future<void> probarNotificacionProgramada() async {
-    print('Probando DIFERENTES métodos de programación...');
-    
-    // Probar diferentes metodos de programacion
-    await _probarZonedSchedule();    // Metodo 1
-    await _probarRepeatInterval();   // Metodo 2
-    _mostrarMensajeProgramacion();   // Mensaje informativo
-  }
-
-  // Prueba el metodo zonedSchedule basico
-  static Future<void> _probarZonedSchedule() async {
-    try {
-      final scheduledTime = tz.TZDateTime.now(tz.local).add(const Duration(seconds: 10));
-      
-      const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-        'recordatorio_medicamento',
-        'Recordatorios de Medicamentos',
-        importance: Importance.high,
-        priority: Priority.high,
-        playSound: true,
-        enableVibration: true,
-      );
-
-      const NotificationDetails details = NotificationDetails(android: androidDetails);
-
-      await _notifications.zonedSchedule(
-        1001,
-        '💊 Prueba 1 - zonedSchedule',
-        'Debería aparecer en 10 segundos',
-        scheduledTime,
-        details,
-        payload: 'medicamento_1001_Prueba_1',
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      );
-      
-      print('Método 1 (zonedSchedule) programado para: $scheduledTime');
-      
-    } catch (e) {
-      print('Error en Método 1: $e');
-    }
-  }
-
-  // Prueba notificaciones con intervalo de repeticion
-  static Future<void> _probarRepeatInterval() async {
-    try {
-      final scheduledTime = tz.TZDateTime.now(tz.local).add(const Duration(seconds: 20));
-      
-      const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-        'recordatorio_medicamento',
-        'Recordatorios de Medicamentos',
-        importance: Importance.high,
-        priority: Priority.high,
-        playSound: true,
-        enableVibration: true,
-      );
-
-      const NotificationDetails details = NotificationDetails(android: androidDetails);
-
-      await _notifications.zonedSchedule(
-        1002,
-        '💊 Prueba 2 - Repeat Daily',
-        'Debería aparecer en 20 segundos',
-        scheduledTime,
-        details,
-        payload: 'medicamento_1002_Prueba_2',
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      );
-      
-      print('Método 2 (repeatInterval) programado para: $scheduledTime');
-      
-    } catch (e) {
-      print('Error en Método 2: $e');
-    }
-  }
-
-  // Muestra mensaje diagnostico sobre el estado de las notificaciones programadas
-  static void _mostrarMensajeProgramacion() {
-    print('');
-    print('DIAGNÓSTICO DE NOTIFICACIONES PROGRAMADAS:');
-    print('   1. Prueba 1 programada para 10 segundos');
-    print('   2. Prueba 2 programada para 20 segundos'); 
-    print('   3. Si no aparecen, necesitamos implementar WorkManager');
-    print('   4. Las notificaciones inmediatas SÍ funcionan');
-    print('');
-  }
-
-  // Metodo de prueba simple para notificaciones inmediatas
-  static Future<void> probarNotificacionInmediata() async {
-    await _mostrarNotificacionMedicamento(
-      nombreMedicamento: 'Medicamento de Prueba Inmediata',
-      idMedicamento: 8888,
-      idMedicamentoReal: 8888,
-    );
   }
 }

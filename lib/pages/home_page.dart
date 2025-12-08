@@ -116,6 +116,16 @@ class HomePage extends StatelessWidget {
                         NotificationService.probarNotificacionInmediata();
                       },
                     ),
+                    // Nuevo botón para notificaciones programadas
+                    _buildFeatureCard(
+                      icon: Icons.schedule,  // Icono diferente para distinguir (o usa Icons.notifications_active)
+                      title: 'Probar Notificación Programada',
+                      color: Colors.green,  // Color diferente para distinguir
+                      onTap: () {
+                        print('Probando notificación programada...');
+                        NotificationService.probarNotificacionProgramada();
+                      },
+                    ),
                   ],
                 ),
               ),
